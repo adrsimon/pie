@@ -1,0 +1,1 @@
+pub const REGISTRY_URL: &str = "https://registry.npmjs.org";
