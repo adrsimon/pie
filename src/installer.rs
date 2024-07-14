@@ -1,16 +1,22 @@
 use std::collections::HashMap;
 use std::env::Args;
+use std::fs::File;
+use std::io::Write;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use async_trait::async_trait;
 use bytes::Bytes;
 use reqwest::Client;
-use semver::{Comparator};
-
+use semver::Comparator;
+use futures::future::BoxFuture;
+use futures::FutureExt;
+use crate::cache::{Cache, CACHE_DIR};
 use crate::command_handler::CommandHandler;
+use crate::constants::LATEST;
 use crate::errors::{CommandError, ParseError};
-use crate::types::VersionData;
+use crate::errors::CommandError::{FailedToCreateFile, FailedToGetTarball};
+use crate::types::{DependencyMap, PackageLock, VersionData};
 use crate::versions::Versions;
 use crate::http::HttpRequest;
 
@@ -22,12 +28,24 @@ pub struct Installer {
 
 static ACTIVE_TASKS: AtomicUsize = AtomicUsize::new(0);
 
+fn increment_active_tasks() {
+    ACTIVE_TASKS.fetch_add(1, Ordering::SeqCst);
+}
+
+fn decrement_active_tasks() {
+    ACTIVE_TASKS.fetch_sub(1, Ordering::SeqCst);
+}
+
+fn get_active_tasks() -> usize {
+    ACTIVE_TASKS.load(Ordering::SeqCst)
+}
+
 type PackageBytes = (String, Bytes);
-type InstalledVersionsMutex = Arc<Mutex<HashMap<String, String>>>;
+type DependencyMapMutex = Arc<Mutex<DependencyMap>>;
 
 impl Installer {
-    async fn get_version_data(client: Client, package_name: &String, version: Option<&Comparator>) -> Result<VersionData, CommandError> {
-        if let Some(v) = Versions::resolve_full_version(version) {
+    async fn get_version_data(client: Client, package_name: &String, full_version: Option<&String>, version: Option<&Comparator>) -> Result<VersionData, CommandError> {
+        if let Some(v) = full_version {
             return HttpRequest::version_data(client.clone(), package_name, &v).await;
         }
 
@@ -37,17 +55,27 @@ impl Installer {
         Ok(package_data.versions.remove(&package_version).expect("Failed to find resolved package version in package data"))
     }
 
-    fn already_resolved(name: &String, version: &String, installed_dependencies_mx: InstalledVersionsMutex) -> bool {
-        let mut installed_dependencies = installed_dependencies_mx.lock().unwrap();
-        let installed_version = installed_dependencies.get(name);
+    fn already_resolved(name: &String, version: &String, is_latest: bool, dependency_map_mx: DependencyMapMutex) -> bool {
+        let mut dependency_map = dependency_map_mx.lock().unwrap();
+        let str_v = Versions::stringify(name, version);
+        let installed_version = dependency_map.get(&str_v);
 
         match installed_version {
-            Some(v) => v == version,
+            Some(_) => true,
             None => {
-                installed_dependencies.insert(name.to_string(), version.to_string());
+                dependency_map.insert(str_v, PackageLock::new(is_latest));
                 false
             }
         }
+    }
+
+    fn append_version(parent_version_name: String, new_version_name: String, dependency_map_mx: DependencyMapMutex) -> Result<(), CommandError> {
+        let mut dependency_map = dependency_map_mx.lock().unwrap();
+        let parent_versions = dependency_map.entry(parent_version_name.to_string()).or_insert(PackageLock::new(parent_version_name.ends_with(LATEST)));
+
+        parent_versions.dependencies.push(new_version_name);
+
+        Ok(())
     }
 
     fn extract_tarball(bytes: Bytes, destination: String) -> Result<(), CommandError> {
@@ -58,41 +86,53 @@ impl Installer {
         archive.unpack(&destination).map_err(CommandError::ExtractionFailed)
     }
 
-    fn install_package(client: Client, version_data: VersionData, sender: Sender<PackageBytes>,installed_dependencies_mx: InstalledVersionsMutex) -> Result<(), CommandError> {
-        if Self::already_resolved(&version_data.name, &version_data.version, Arc::clone(&installed_dependencies_mx)) {
-            return Ok(());
-        }
+    fn install_package(client: Client, version_data: VersionData, is_latest: bool, sender: Sender<PackageBytes>, dependency_map_mx: DependencyMapMutex) -> BoxFuture<'static, Result<(), CommandError>> {
+        async move {
+            println!("Installing '{}@{}' ...", version_data.name, version_data.version);
 
-        let cache_dir = dirs::cache_dir().expect("Could not find cache directory");
-        let package_dest = format!("{}/node-cache/{}@{}",
-                                   cache_dir.to_str().expect("Couldn't convert PathBuf to &str"),
-                                   version_data.name,
-                                   version_data.version);
+            if Self::already_resolved(&version_data.name, &version_data.version, is_latest, Arc::clone(&dependency_map_mx)) {
+                println!("Package already installed");
+                return Ok(());
+            }
 
-        let tarball_url = version_data.dist.tarball.clone();
+            let package_dest = format!("{}/{}", *CACHE_DIR, Versions::stringify(&version_data.name, &version_data.version));
+            let tarball_url = version_data.dist.tarball.clone();
+            let stringified_parent = Versions::stringify(&version_data.name, &version_data.version);
 
-        tokio::spawn(async move {
-            ACTIVE_TASKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            increment_active_tasks();
 
             let bytes = HttpRequest::get_bytes(client.clone(), tarball_url)
                 .await
-                .unwrap();
+                .map_err(|_| FailedToGetTarball)?;
 
-            sender.send((package_dest, bytes)).unwrap();
+            sender.send((package_dest, bytes)).expect("Failed to send package to installation thread");
 
             let dependencies = version_data.dependencies.unwrap_or(HashMap::new());
 
             for (name, version) in dependencies {
+                println!("Installing dependency '{}@{}' ...", name, version);
                 let v = Versions::parse_semantic_version(&version).expect("Failed to parse semantic version");
-                let version_data = Self::get_version_data(client.clone(), &name, Some(&v)).await.unwrap();
+                let v_ref = Some(&v);
 
-                Self::install_package(client.clone(), version_data, sender.clone(), Arc::clone(&installed_dependencies_mx)).unwrap();
+                let full_version = Versions::resolve_full_version(v_ref);
+                let full_version_ref = full_version.as_ref();
+                let is_cached = Cache::exists(&name, full_version_ref, v_ref).await.unwrap();
+
+                if is_cached {
+                    println!("Dependency '{}' already installed", name);
+                    continue;
+                }
+
+                let version_data = Self::get_version_data(client.clone(), &name, full_version_ref, v_ref).await.unwrap();
+                let stringified_version = Versions::stringify(&name, &version);
+
+                Self::append_version(stringified_parent.clone(), stringified_version, Arc::clone(&dependency_map_mx)).unwrap();
+                Self::install_package(client.clone(), version_data, Versions::is_latest(full_version), sender.clone(), Arc::clone(&dependency_map_mx)).await?;
             }
 
-            ACTIVE_TASKS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-        });
-
-        Ok(())
+            decrement_active_tasks();
+            Ok(())
+        }.boxed()
     }
 }
 
@@ -103,7 +143,7 @@ impl CommandHandler for Installer {
             .next()
             .ok_or(ParseError::MissingArgument(String::from("package_name")))?;
 
-        let (package_name, package_version) = Versions::parse_package(package)?;
+        let (package_name, package_version) = Versions::parse_semantic_package_details(package)?;
         self.package_name = package_name;
         self.package_version = package_version;
 
@@ -111,28 +151,46 @@ impl CommandHandler for Installer {
     }
 
     async fn execute(&mut self) -> Result<(), CommandError> {
-        println!("Installing '{}' ...", self.package_name);
-
         let client = Client::new();
         let now = std::time::Instant::now();
 
-        let version_data = Self::get_version_data(client.clone(), &self.package_name, self.package_version.as_ref()).await?;
+        let semantic_version_ref = self.package_version.as_ref();
+        let full_version = Versions::resolve_full_version(semantic_version_ref);
+        let full_version_ref = full_version.as_ref();
+        let is_cached = Cache::exists(&self.package_name, full_version_ref, semantic_version_ref).await?;
+
+        if is_cached {
+            println!("Package already installed");
+            return Ok(());
+        }
+
+        let version_data = Self::get_version_data(client.clone(), &self.package_name, full_version_ref, self.package_version.as_ref()).await?;
         let (sender, receiver) = channel::<PackageBytes>();
 
         tokio::task::spawn_blocking(move || {
-            ACTIVE_TASKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            increment_active_tasks();
 
             while let Ok((package_dest, bytes)) = receiver.recv() {
-                Self::extract_tarball(bytes, package_dest).unwrap();
+                Installer::extract_tarball(bytes, package_dest).unwrap();
             }
 
-            ACTIVE_TASKS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            decrement_active_tasks();
         });
 
-        let installed_dependencies_mx: InstalledVersionsMutex = Arc::new(Mutex::new(HashMap::new()));
-        Self::install_package(client, version_data, sender, installed_dependencies_mx)?;
+        let dependency_map_mx: DependencyMapMutex = Arc::new(Mutex::new(HashMap::new()));
+        Self::install_package(client, version_data, Versions::is_latest(full_version), sender, Arc::clone(&dependency_map_mx)).await?;
 
-        while ACTIVE_TASKS.load(std::sync::atomic::Ordering::SeqCst) > 0 {}
+        while get_active_tasks() > 0 {}
+
+        let dependency_map = dependency_map_mx.lock().unwrap();
+        for (package, package_lock) in dependency_map.iter() {
+            let prefix = format!("{}/{}/package", *CACHE_DIR, package);
+            std::fs::create_dir_all(&prefix).map_err(FailedToCreateFile)?;
+            let mut file = File::create(format!("{}/pie-lock.json", prefix)).map_err(FailedToCreateFile)?;
+
+            let package_lock = serde_json::to_string(package_lock).map_err(CommandError::FailedToSerializePackageLock)?;
+            file.write_all(package_lock.as_bytes()).map_err(FailedToCreateFile)?;
+        }
 
         let elapsed = now.elapsed();
         println!("Finished in {} ms", elapsed.as_millis());

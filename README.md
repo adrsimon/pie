@@ -22,11 +22,17 @@ It can install packages from the npm registry. Here is a list of commands:
 
 Here is a sort of **roadmap** of what I want to implement in the future:
 
-- Caching of packages
-- Support of a `package.json`, and a `package-lock.json` file
+- Support of a `package.json`, and a `package-lock.json` file in the project directory
 - An `uninstall` and an `update` command
+- 
 - Help messages for each command
 - _More to come..._
+
+## Known issues
+
+- Problems parsing package names when they contain a `@` symbol, such as `@babel/core`
+- Problems retrieving lockfile when package contains a / in its name, such as `@vue/compiler-core`
+- Keeps reinstalling the same package when it's already installed, if the version is not specified (which defaults to "latest")
 
 ## Inspiration
 

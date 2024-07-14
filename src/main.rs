@@ -5,6 +5,7 @@ mod types;
 mod constants;
 mod versions;
 mod http;
+mod cache;
 
 use std::env;
 
