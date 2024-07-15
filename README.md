@@ -32,7 +32,6 @@ Here is a sort of **roadmap** of what I want to implement in the future:
 
 - Problems parsing package names when they contain a `@` symbol, such as `@babel/core`
 - Problems retrieving lockfile when package contains a / in its name, such as `@vue/compiler-core`
-- Keeps reinstalling the same package when it's already installed, if the version is not specified (which defaults to "latest")
 
 ## Inspiration
 

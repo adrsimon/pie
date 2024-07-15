@@ -116,7 +116,7 @@ impl Installer {
 
                 let full_version = Versions::resolve_full_version(v_ref);
                 let full_version_ref = full_version.as_ref();
-                let is_cached = Cache::exists(&name, full_version_ref, v_ref).await.unwrap();
+                let (is_cached, _) = Cache::exists(&name, full_version_ref, v_ref).await.unwrap();
 
                 if is_cached {
                     println!("Dependency '{}' already installed", name);
@@ -157,7 +157,7 @@ impl CommandHandler for Installer {
         let semantic_version_ref = self.package_version.as_ref();
         let full_version = Versions::resolve_full_version(semantic_version_ref);
         let full_version_ref = full_version.as_ref();
-        let is_cached = Cache::exists(&self.package_name, full_version_ref, semantic_version_ref).await?;
+        let (is_cached, _) = Cache::exists(&self.package_name, full_version_ref, semantic_version_ref).await?;
 
         if is_cached {
             println!("Package already installed");
