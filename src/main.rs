@@ -2,10 +2,11 @@ mod command_handler;
 mod errors;
 mod installer;
 mod types;
-mod constants;
+mod utils;
 mod versions;
 mod http;
 mod cache;
+mod handlers;
 
 use std::env;
 

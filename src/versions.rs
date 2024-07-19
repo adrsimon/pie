@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::str::FromStr;
 use semver::{Comparator, Op, Version, VersionReq};
-use crate::constants::{EMPTY_VERSION, LATEST};
+use crate::utils::{EMPTY_VERSION, LATEST};
 use crate::errors::{CommandError, ParseError};
 use crate::types::VersionData;
 
@@ -99,7 +99,7 @@ impl Versions {
         });
     }
 
-    pub fn is_latest(version_string: Option<String>) -> bool {
+    pub fn is_latest(version_string: Option<&String>) -> bool {
         match version_string {
             Some(version) => version == LATEST,
             None => false,

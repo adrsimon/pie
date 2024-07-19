@@ -31,8 +31,12 @@ pub enum CommandError {
     FailedDirectoryEntry(Error),
     #[error("failed to create file ({0})")]
     FailedToCreateFile(Error),
+    #[error("failed to create directory ({0})")]
+    FailedToCreateDir(Error),
     #[error("failed to serialize package lock ({0})")]
     FailedToSerializePackageLock(serde_json::Error),
     #[error("failed to get tarball from http response")]
     FailedToGetTarball,
+    #[error("failed to write file ({0})")]
+    FailedToWriteFile(Error),
 }

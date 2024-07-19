@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 use std::fs::{self as fs_sync, File};
 use std::io::{Read, Seek, SeekFrom};
+use std::path::Path;
 use std::str::FromStr;
 use std::string::String;
 use tokio::fs;
 use lazy_static::lazy_static;
 use semver::{Comparator, Version};
-use crate::constants::{EMPTY_VERSION, LATEST};
+use crate::utils::{EMPTY_VERSION, LATEST};
 use crate::errors::CommandError;
 use crate::versions::Versions;
 
@@ -38,9 +39,9 @@ impl Cache {
                 return Ok((latest_version.is_some(), latest_version));
             }
 
-            let str_version = Versions::stringify(&package_name, &version);
+            let str_version = Versions::stringify(package_name, version);
             return Ok((
-                fs::metadata(format!("{}/{}", &*CACHE_DIR, str_version)).await.is_ok(),
+                Path::new(format!("{}/{}", *CACHE_DIR, str_version).as_str()).exists(),
                 Some(version.to_string())
             ))
         }
@@ -97,14 +98,10 @@ impl Cache {
     }
 
     pub fn get_latest_version_in_cache(package_name: &String) -> Option<String> {
-        if let Some(cached_version) = CACHED_VERSIONS.get(package_name) {
-            Some(cached_version.version.to_string())
-        } else {
-            None
-        }
+        CACHED_VERSIONS.get(package_name).map(|v| v.version.clone().to_string())
     }
 
     pub fn load_cached_version(package: String) {
-        todo!("Implement loading cached version")
+        println!("Need to implement loading cached version - Retrieve {}", package);
     }
 }

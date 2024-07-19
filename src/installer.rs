@@ -1,52 +1,37 @@
 use std::collections::HashMap;
-use std::env::Args;
-use std::fs::File;
-use std::io::Write;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{channel, Sender};
-use async_trait::async_trait;
+use std::sync::mpsc::Sender;
 use bytes::Bytes;
 use reqwest::Client;
 use semver::Comparator;
-use futures::future::BoxFuture;
-use futures::FutureExt;
 use crate::cache::{Cache, CACHE_DIR};
-use crate::command_handler::CommandHandler;
-use crate::constants::LATEST;
-use crate::errors::{CommandError, ParseError};
-use crate::errors::CommandError::{FailedToCreateFile, FailedToGetTarball};
+use crate::utils::{LATEST, TaskAllocator};
+use crate::errors::{CommandError};
 use crate::types::{DependencyMap, PackageLock, VersionData};
 use crate::versions::Versions;
 use crate::http::HttpRequest;
 
-#[derive(Default)]
-pub struct Installer {
-    package_name: String,
-    package_version: Option<Comparator>
+pub type PackageBytes = (String, Bytes);
+pub type DependencyMapMutex = Arc<Mutex<DependencyMap>>;
+
+#[derive(Clone)]
+pub struct InstallContext {
+    pub client: Client,
+    pub sender: Sender<PackageBytes>,
+    pub dependency_map_mx: DependencyMapMutex,
 }
 
-static ACTIVE_TASKS: AtomicUsize = AtomicUsize::new(0);
-
-fn increment_active_tasks() {
-    ACTIVE_TASKS.fetch_add(1, Ordering::SeqCst);
+pub struct PackageInfo {
+    pub version_data: VersionData,
+    pub is_latest: bool,
+    pub stringified: String,
 }
 
-fn decrement_active_tasks() {
-    ACTIVE_TASKS.fetch_sub(1, Ordering::SeqCst);
-}
-
-fn get_active_tasks() -> usize {
-    ACTIVE_TASKS.load(Ordering::SeqCst)
-}
-
-type PackageBytes = (String, Bytes);
-type DependencyMapMutex = Arc<Mutex<DependencyMap>>;
-
+pub struct Installer;
 impl Installer {
-    async fn get_version_data(client: Client, package_name: &String, full_version: Option<&String>, version: Option<&Comparator>) -> Result<VersionData, CommandError> {
+    pub async fn get_version_data(client: Client, package_name: &String, full_version: Option<&String>, version: Option<&Comparator>) -> Result<VersionData, CommandError> {
         if let Some(v) = full_version {
-            return HttpRequest::version_data(client.clone(), package_name, &v).await;
+            return HttpRequest::version_data(client.clone(), package_name, v).await;
         }
 
         let mut package_data = HttpRequest::package_data(client.clone(), package_name).await?;
@@ -55,21 +40,22 @@ impl Installer {
         Ok(package_data.versions.remove(&package_version).expect("Failed to find resolved package version in package data"))
     }
 
-    fn already_resolved(name: &String, version: &String, is_latest: bool, dependency_map_mx: DependencyMapMutex) -> bool {
-        let mut dependency_map = dependency_map_mx.lock().unwrap();
-        let str_v = Versions::stringify(name, version);
-        let installed_version = dependency_map.get(&str_v);
+    fn already_resolved(context: &InstallContext, package_info: &PackageInfo) -> bool {
+        let mut dependency_map = context.dependency_map_mx.lock().unwrap();
+        let stringified = Versions::stringify(&package_info.version_data.name, &package_info.version_data.version);
 
-        match installed_version {
+        let installed_versions = dependency_map.get(&stringified);
+
+        match installed_versions {
             Some(_) => true,
             None => {
-                dependency_map.insert(str_v, PackageLock::new(is_latest));
+                dependency_map.insert(stringified, PackageLock::new(package_info.is_latest));
                 false
             }
         }
     }
 
-    fn append_version(parent_version_name: String, new_version_name: String, dependency_map_mx: DependencyMapMutex) -> Result<(), CommandError> {
+    fn append_version(parent_version_name: &String, new_version_name: String, dependency_map_mx: DependencyMapMutex) -> Result<(), CommandError> {
         let mut dependency_map = dependency_map_mx.lock().unwrap();
         let parent_versions = dependency_map.entry(parent_version_name.to_string()).or_insert(PackageLock::new(parent_version_name.ends_with(LATEST)));
 
@@ -78,123 +64,60 @@ impl Installer {
         Ok(())
     }
 
-    fn extract_tarball(bytes: Bytes, destination: String) -> Result<(), CommandError> {
-        let bytes = &bytes.to_vec()[..];
-        let gz = flate2::read::GzDecoder::new(bytes);
-        let mut archive = tar::Archive::new(gz);
-
-        archive.unpack(&destination).map_err(CommandError::ExtractionFailed)
-    }
-
-    fn install_package(client: Client, version_data: VersionData, is_latest: bool, sender: Sender<PackageBytes>, dependency_map_mx: DependencyMapMutex) -> BoxFuture<'static, Result<(), CommandError>> {
-        async move {
-            println!("Installing '{}@{}' ...", version_data.name, version_data.version);
-
-            if Self::already_resolved(&version_data.name, &version_data.version, is_latest, Arc::clone(&dependency_map_mx)) {
-                println!("Package already installed");
-                return Ok(());
-            }
-
-            let package_dest = format!("{}/{}", *CACHE_DIR, Versions::stringify(&version_data.name, &version_data.version));
-            let tarball_url = version_data.dist.tarball.clone();
-            let stringified_parent = Versions::stringify(&version_data.name, &version_data.version);
-
-            increment_active_tasks();
-
-            let bytes = HttpRequest::get_bytes(client.clone(), tarball_url)
-                .await
-                .map_err(|_| FailedToGetTarball)?;
-
-            sender.send((package_dest, bytes)).expect("Failed to send package to installation thread");
-
-            let dependencies = version_data.dependencies.unwrap_or(HashMap::new());
-
-            for (name, version) in dependencies {
-                println!("Installing dependency '{}@{}' ...", name, version);
-                let v = Versions::parse_semantic_version(&version).expect("Failed to parse semantic version");
-                let v_ref = Some(&v);
-
-                let full_version = Versions::resolve_full_version(v_ref);
-                let full_version_ref = full_version.as_ref();
-                let (is_cached, _) = Cache::exists(&name, full_version_ref, v_ref).await.unwrap();
-
-                if is_cached {
-                    println!("Dependency '{}' already installed", name);
-                    continue;
-                }
-
-                let version_data = Self::get_version_data(client.clone(), &name, full_version_ref, v_ref).await.unwrap();
-                let stringified_version = Versions::stringify(&name, &version);
-
-                Self::append_version(stringified_parent.clone(), stringified_version, Arc::clone(&dependency_map_mx)).unwrap();
-                Self::install_package(client.clone(), version_data, Versions::is_latest(full_version), sender.clone(), Arc::clone(&dependency_map_mx)).await?;
-            }
-
-            decrement_active_tasks();
-            Ok(())
-        }.boxed()
-    }
-}
-
-#[async_trait]
-impl CommandHandler for Installer {
-    fn parse(&mut self, args: &mut Args) -> Result<(), ParseError> {
-        let package = args
-            .next()
-            .ok_or(ParseError::MissingArgument(String::from("package_name")))?;
-
-        let (package_name, package_version) = Versions::parse_semantic_package_details(package)?;
-        self.package_name = package_name;
-        self.package_version = package_version;
-
-        Ok(())
-    }
-
-    async fn execute(&mut self) -> Result<(), CommandError> {
-        let client = Client::new();
-        let now = std::time::Instant::now();
-
-        let semantic_version_ref = self.package_version.as_ref();
-        let full_version = Versions::resolve_full_version(semantic_version_ref);
-        let full_version_ref = full_version.as_ref();
-        let (is_cached, _) = Cache::exists(&self.package_name, full_version_ref, semantic_version_ref).await?;
-
-        if is_cached {
-            println!("Package already installed");
+    pub fn install_package(context: InstallContext, package_info: PackageInfo) -> Result<(), CommandError> {
+        if Self::already_resolved(&context, &package_info) {
+            println!("Package '{}' already resolved", package_info.stringified);
             return Ok(());
         }
 
-        let version_data = Self::get_version_data(client.clone(), &self.package_name, full_version_ref, self.package_version.as_ref()).await?;
-        let (sender, receiver) = channel::<PackageBytes>();
+        println!("Launching task to download package '{}'", package_info.stringified);
+        TaskAllocator::add_task(async move {
+            println!("Downloading package '{}'", package_info.stringified);
+            let version_data = package_info.version_data;
+            let package_bytes = HttpRequest::get_bytes(context.client.clone(), version_data.dist.tarball).await.unwrap();
+            println!("Downloaded package '{}'", package_info.stringified);
 
-        tokio::task::spawn_blocking(move || {
-            increment_active_tasks();
+            println!("Sending package '{}' to extraction task", package_info.stringified);
+            let package_destination = format!("{}/{}", *CACHE_DIR, package_info.stringified);
+            context.sender.send((package_destination, package_bytes)).unwrap();
 
-            while let Ok((package_dest, bytes)) = receiver.recv() {
-                Installer::extract_tarball(bytes, package_dest).unwrap();
-            }
+            let dependencies = version_data.dependencies.unwrap_or(HashMap::new());
 
-            decrement_active_tasks();
+            println!("Installing dependencies for '{}'", package_info.stringified);
+            Self::install_dependencies(&package_info.stringified, context, dependencies).await;
         });
 
-        let dependency_map_mx: DependencyMapMutex = Arc::new(Mutex::new(HashMap::new()));
-        Self::install_package(client, version_data, Versions::is_latest(full_version), sender, Arc::clone(&dependency_map_mx)).await?;
-
-        while get_active_tasks() > 0 {}
-
-        let dependency_map = dependency_map_mx.lock().unwrap();
-        for (package, package_lock) in dependency_map.iter() {
-            let prefix = format!("{}/{}/package", *CACHE_DIR, package);
-            std::fs::create_dir_all(&prefix).map_err(FailedToCreateFile)?;
-            let mut file = File::create(format!("{}/pie-lock.json", prefix)).map_err(FailedToCreateFile)?;
-
-            let package_lock = serde_json::to_string(package_lock).map_err(CommandError::FailedToSerializePackageLock)?;
-            file.write_all(package_lock.as_bytes()).map_err(FailedToCreateFile)?;
-        }
-
-        let elapsed = now.elapsed();
-        println!("Finished in {} ms", elapsed.as_millis());
-
         Ok(())
+    }
+
+    async fn install_dependencies(parent: &String, context: InstallContext, dependencies: HashMap<String, String>) {
+        for (name, version) in dependencies {
+            let c = Versions::parse_semantic_version(&version).unwrap();
+            let comparator_ref = Some(&c);
+
+            let full_version = Versions::resolve_full_version(comparator_ref);
+            let full_version_ref = full_version.as_ref();
+
+            let (is_cached, cached_version) = Cache::exists(&name, full_version_ref, comparator_ref).await.unwrap();
+
+            if is_cached {
+                let version = full_version.or(cached_version).expect("Failed to get version of cached package");
+                let stringified = Versions::stringify(&name, &version);
+                Cache::load_cached_version(stringified);
+                continue;
+            }
+
+            let version_data = Self::get_version_data(context.client.clone(), &name, full_version_ref, comparator_ref).await.unwrap();
+            let stringified = Versions::stringify(&name, &version_data.version);
+            Self::append_version(parent, stringified.to_string(), Arc::clone(&context.dependency_map_mx)).unwrap();
+
+            let package_info = PackageInfo {
+                version_data,
+                is_latest: Versions::is_latest(Some(&stringified)),
+                stringified,
+            };
+
+            Self::install_package(context.clone(), package_info).unwrap();
+        }
     }
 }

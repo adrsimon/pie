@@ -7,7 +7,7 @@ pub struct HttpRequest;
 impl HttpRequest {
     async fn registry(client: Client, route: String) -> Result<String, CommandError> {
         client
-            .get(format!("{}/{}", crate::constants::REGISTRY_URL, route))
+            .get(format!("{}/{}", crate::utils::REGISTRY_URL, route))
             .header("Accept",
                     "application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8, */*")
             .send()
