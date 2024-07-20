@@ -1,12 +1,12 @@
-use std::future::Future;
-use std::path::Path;
-use std::sync::atomic::AtomicUsize;
+use crate::errors::CommandError;
 use bytes::Bytes;
 use flate2::bufread::GzDecoder;
 use semver::{BuildMetadata, Prerelease, Version};
+use std::future::Future;
+use std::path::Path;
+use std::sync::atomic::AtomicUsize;
 use tar::Archive;
 use tokio::task::JoinHandle;
-use crate::errors::CommandError;
 
 pub const REGISTRY_URL: &str = "https://registry.npmjs.org";
 
@@ -25,7 +25,10 @@ pub fn extract_tarball(bytes: Bytes, destination: String) -> Result<(), CommandE
     let gz = GzDecoder::new(bytes);
     let mut archive = Archive::new(gz);
 
-    archive.unpack(&destination).map_err(CommandError::ExtractionFailed).expect("Failed to extract tarball");
+    archive
+        .unpack(&destination)
+        .map_err(CommandError::ExtractionFailed)
+        .expect("Failed to extract tarball");
 
     Ok(())
 }

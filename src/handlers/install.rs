@@ -1,14 +1,3 @@
-use std::collections::HashMap;
-use std::env::Args;
-use std::fs;
-use std::fs::{File};
-use std::io::Write;
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::AtomicBool;
-use std::sync::mpsc::channel;
-use async_trait::async_trait;
-use reqwest::Client;
-use semver::Comparator;
 use crate::cache::{Cache, CACHE_DIR};
 use crate::command_handler::CommandHandler;
 use crate::errors::{CommandError, ParseError};
@@ -16,6 +5,17 @@ use crate::installer::{DependencyMapMutex, InstallContext, Installer, PackageByt
 use crate::utils;
 use crate::utils::TaskAllocator;
 use crate::versions::Versions;
+use async_trait::async_trait;
+use reqwest::Client;
+use semver::Comparator;
+use std::collections::HashMap;
+use std::env::Args;
+use std::fs;
+use std::fs::File;
+use std::io::Write;
+use std::sync::atomic::AtomicBool;
+use std::sync::mpsc::channel;
+use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
 pub struct InstallHandler {
@@ -30,9 +30,12 @@ impl InstallHandler {
         for (package_name, lock) in dependency_map.iter() {
             let path = format!("{}/{}/package/", *CACHE_DIR, package_name);
             fs::create_dir_all(path.clone()).map_err(CommandError::FailedToCreateDir)?;
-            let mut file = File::create(format!("{path}/pie-lock.json")).map_err(CommandError::FailedToCreateFile)?;
-            let lock = serde_json::to_string(lock).map_err(CommandError::FailedToSerializePackageLock)?;
-            file.write_all(lock.as_bytes()).map_err(CommandError::FailedToWriteFile)?;
+            let mut file = File::create(format!("{path}/pie-lock.json"))
+                .map_err(CommandError::FailedToCreateFile)?;
+            let lock =
+                serde_json::to_string(lock).map_err(CommandError::FailedToSerializePackageLock)?;
+            file.write_all(lock.as_bytes())
+                .map_err(CommandError::FailedToWriteFile)?;
         }
 
         Ok(())
@@ -60,7 +63,8 @@ impl CommandHandler for InstallHandler {
         let semantic_version_ref = self.package_version.as_ref();
         let full_version = Versions::resolve_full_version(semantic_version_ref);
         let full_version_ref = full_version.as_ref();
-        let (is_cached, cached_version) = Cache::exists(&self.package_name, full_version_ref, semantic_version_ref).await?;
+        let (is_cached, cached_version) =
+            Cache::exists(&self.package_name, full_version_ref, semantic_version_ref).await?;
 
         utils::create_node_modules_dir();
 
@@ -70,7 +74,13 @@ impl CommandHandler for InstallHandler {
             return Ok(());
         }
 
-        let version_data = Installer::get_version_data(client.clone(), &self.package_name, full_version_ref, semantic_version_ref).await?;
+        let version_data = Installer::get_version_data(
+            client.clone(),
+            &self.package_name,
+            full_version_ref,
+            semantic_version_ref,
+        )
+        .await?;
 
         let (sender, receiver) = channel::<PackageBytes>();
 
@@ -106,9 +116,12 @@ impl CommandHandler for InstallHandler {
             stringified: stringified.clone(),
         };
 
-
         println!("Installing the package");
-        Installer::install_package(install_context, package_info, Arc::new(Mutex::new(Vec::new())))?;
+        Installer::install_package(
+            install_context,
+            package_info,
+            Arc::new(Mutex::new(Vec::new())),
+        )?;
         TaskAllocator::block_until_done();
         println!("All tasks are done!");
 

@@ -1,3 +1,8 @@
+use crate::errors::CommandError;
+use crate::utils::{EMPTY_VERSION, LATEST};
+use crate::versions::Versions;
+use lazy_static::lazy_static;
+use semver::{Comparator, Version};
 use std::collections::HashMap;
 use std::fs::{self as fs_sync, File};
 use std::io::{Read, Seek, SeekFrom};
@@ -5,11 +10,6 @@ use std::path::Path;
 use std::str::FromStr;
 use std::string::String;
 use tokio::fs;
-use lazy_static::lazy_static;
-use semver::{Comparator, Version};
-use crate::utils::{EMPTY_VERSION, LATEST};
-use crate::errors::CommandError;
-use crate::versions::Versions;
 
 lazy_static! {
     pub static ref CACHE_DIR: String = format!(
@@ -19,7 +19,6 @@ lazy_static! {
             .to_str()
             .expect("Couldn't convert cache directory path to string")
     );
-
     pub static ref CACHED_VERSIONS: CachedVersions = Cache::get_cached_versions();
 }
 
@@ -32,7 +31,11 @@ pub type CachedVersions = HashMap<String, CachedVersion>;
 
 pub struct Cache;
 impl Cache {
-    pub async fn exists(package_name: &String, version: Option<&String>, sem_ver: Option<&Comparator>) -> Result<(bool, Option<String>), CommandError> {
+    pub async fn exists(
+        package_name: &String,
+        version: Option<&String>,
+        sem_ver: Option<&Comparator>,
+    ) -> Result<(bool, Option<String>), CommandError> {
         if let Some(version) = version {
             if version == LATEST {
                 let latest_version = Self::get_latest_version_in_cache(package_name);
@@ -41,15 +44,22 @@ impl Cache {
 
             return Ok((
                 Self::is_in_cache(package_name, &version),
-                Some(version.to_string())
-            ))
+                Some(version.to_string()),
+            ));
         }
 
         println!("{}", CACHE_DIR.to_string());
-        let mut cache_entries = fs::read_dir(CACHE_DIR.to_string()).await.map_err(CommandError::NoCacheDirectory)?;
+        let mut cache_entries = fs::read_dir(CACHE_DIR.to_string())
+            .await
+            .map_err(CommandError::NoCacheDirectory)?;
         let sem_ver = sem_ver.expect("Failed to get semver");
 
-        while let Some(cache_entry) = cache_entries.next_entry().await.map_err(CommandError::FailedDirectoryEntry).unwrap() {
+        while let Some(cache_entry) = cache_entries
+            .next_entry()
+            .await
+            .map_err(CommandError::FailedDirectoryEntry)
+            .unwrap()
+        {
             let filename = cache_entry.file_name().to_string_lossy().to_string();
 
             if !filename.starts_with(package_name) {
@@ -60,7 +70,7 @@ impl Cache {
             let version = &Version::from_str(entry_version.as_str()).unwrap_or(EMPTY_VERSION);
 
             if sem_ver.matches(version) {
-                return Ok((true, Some(entry_version)))
+                return Ok((true, Some(entry_version)));
             }
         }
 
@@ -75,7 +85,8 @@ impl Cache {
             let entry = entry.expect("Failed to get cache entry");
             let filename = entry.file_name().to_string_lossy().to_string();
 
-            let mut lock = File::open(format!("{}/{}/package/pie-lock.json", *CACHE_DIR, filename)).expect("Failed to open lock file");
+            let mut lock = File::open(format!("{}/{}/package/pie-lock.json", *CACHE_DIR, filename))
+                .expect("Failed to open lock file");
 
             let start_byte = 12;
             let end_byte = 15;
@@ -87,10 +98,7 @@ impl Cache {
             let is_latest = String::from_utf8(buf).unwrap() == "true";
 
             let (name, version) = Versions::parse_raw_package_details(filename);
-            cached_versions.insert(name, CachedVersion {
-                version,
-                is_latest,
-            });
+            cached_versions.insert(name, CachedVersion { version, is_latest });
         }
 
         cached_versions
@@ -113,7 +121,9 @@ impl Cache {
     }
 
     pub fn load_cached_version(package: String) {
-        let raw = fs_sync::read_to_string(format!("{}/{}/package/pie-lock.json", *CACHE_DIR, package)).expect("Failed to read lock file");
+        let raw =
+            fs_sync::read_to_string(format!("{}/{}/package/pie-lock.json", *CACHE_DIR, package))
+                .expect("Failed to read lock file");
         let lock = serde_json::from_str::<PackageLock>(raw.as_str()).unwrap();
 
         let mut dependencies = lock.dependencies;

@@ -1,9 +1,9 @@
-use std::collections::HashMap;
-use std::str::FromStr;
-use semver::{Comparator, Op, Version, VersionReq};
-use crate::utils::{EMPTY_VERSION, LATEST};
 use crate::errors::{CommandError, ParseError};
 use crate::types::VersionData;
+use crate::utils::{EMPTY_VERSION, LATEST};
+use semver::{Comparator, Op, Version, VersionReq};
+use std::collections::HashMap;
+use std::str::FromStr;
 
 type PackageDetails = (String, Option<Comparator>);
 
@@ -51,14 +51,20 @@ impl Versions {
         };
 
         match semantic_version.op {
-            Op::Greater | Op::GreaterEq | Op::Wildcard => Some(latest), Op::Exact | Op::LessEq | Op::Tilde | Op::Caret => {
-                Some(Self::stringify_from_nums(semantic_version.major, minor, patch))
-            }
+            Op::Greater | Op::GreaterEq | Op::Wildcard => Some(latest),
+            Op::Exact | Op::LessEq | Op::Tilde | Op::Caret => Some(Self::stringify_from_nums(
+                semantic_version.major,
+                minor,
+                patch,
+            )),
             _ => None,
         }
     }
 
-    pub fn resolve_partial_version(semantic_version: Option<&Comparator>, available_versions: &HashMap<String, VersionData>, ) -> Result<String, CommandError> {
+    pub fn resolve_partial_version(
+        semantic_version: Option<&Comparator>,
+        available_versions: &HashMap<String, VersionData>,
+    ) -> Result<String, CommandError> {
         let semantic_version = semantic_version
             .expect("Function should not be called as the version can be resolved to 'latest'");
 
@@ -75,7 +81,11 @@ impl Versions {
                     })
                     .ok_or(CommandError::InvalidVersion)?;
 
-                return Ok(versions.get(version_pos - 1).expect("No previous version found").0.to_string());
+                return Ok(versions
+                    .get(version_pos - 1)
+                    .expect("No previous version found")
+                    .0
+                    .to_string());
             }
         }
 
