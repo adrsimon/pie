@@ -55,19 +55,28 @@ impl Installer {
         }
     }
 
-    fn append_version(parent_version_name: &String, new_version_name: String, dependency_map_mx: DependencyMapMutex) -> Result<(), CommandError> {
+    fn append_version(parents_mux: Arc<Mutex<Vec<String>>>, new_version_name: String, dependency_map_mx: DependencyMapMutex) -> Result<(), CommandError> {
         let mut dependency_map = dependency_map_mx.lock().unwrap();
-        let parent_versions = dependency_map.entry(parent_version_name.to_string()).or_insert(PackageLock::new(parent_version_name.ends_with(LATEST)));
+        let parents = parents_mux.lock().unwrap();
 
-        parent_versions.dependencies.push(new_version_name);
+        for parent in parents.iter() {
+            let parent_version = dependency_map.entry(parent.to_string()).or_insert(PackageLock::new(parent.ends_with(LATEST)));
+            parent_version.dependencies.push(new_version_name.to_string());
+        }
 
         Ok(())
     }
 
-    pub fn install_package(context: InstallContext, package_info: PackageInfo) -> Result<(), CommandError> {
+    pub fn install_package(context: InstallContext, package_info: PackageInfo, parents_mux: Arc<Mutex<Vec<String>>>) -> Result<(), CommandError> {
         if Self::already_resolved(&context, &package_info) {
             println!("Package '{}' already resolved", package_info.stringified);
             return Ok(());
+        }
+
+        Self::append_version(Arc::clone(&parents_mux), package_info.stringified.to_string(), Arc::clone(&context.dependency_map_mx)).unwrap();
+        {
+            let mut parents = parents_mux.lock().unwrap();
+            parents.push(package_info.stringified.to_string());
         }
 
         println!("Launching task to download package '{}'", package_info.stringified);
@@ -84,32 +93,35 @@ impl Installer {
             let dependencies = version_data.dependencies.unwrap_or(HashMap::new());
 
             println!("Installing dependencies for '{}'", package_info.stringified);
-            Self::install_dependencies(&package_info.stringified, context, dependencies).await;
+            Self::install_dependencies(parents_mux, context, dependencies).await;
         });
 
         Ok(())
     }
 
-    async fn install_dependencies(parent: &String, context: InstallContext, dependencies: HashMap<String, String>) {
+    async fn install_dependencies(parents_mux: Arc<Mutex<Vec<String>>>, context: InstallContext, dependencies: HashMap<String, String>) {
         for (name, version) in dependencies {
             let c = Versions::parse_semantic_version(&version).unwrap();
-            let comparator_ref = Some(&c);
+            let comparator = Some(&c);
 
-            let full_version = Versions::resolve_full_version(comparator_ref);
-            let full_version_ref = full_version.as_ref();
+            let full_version = Versions::resolve_full_version(comparator);
+            let full_version = full_version.as_ref();
 
-            let (is_cached, cached_version) = Cache::exists(&name, full_version_ref, comparator_ref).await.unwrap();
+            let (is_cached, cached_version) = Cache::exists(&name, full_version, comparator).await.unwrap();
 
             if is_cached {
-                let version = full_version.or(cached_version).expect("Failed to get version of cached package");
+                let version = cached_version.expect("Failed to get cached version");
                 let stringified = Versions::stringify(&name, &version);
-                Cache::load_cached_version(stringified);
-                continue;
+
+                let dependency_map = context.dependency_map_mx.lock().unwrap();
+                if dependency_map.get(stringified.as_str()).is_none() {
+                    Cache::load_cached_version(stringified);
+                    continue;
+                }
             }
 
-            let version_data = Self::get_version_data(context.client.clone(), &name, full_version_ref, comparator_ref).await.unwrap();
+            let version_data = Self::get_version_data(context.client.clone(), &name, full_version, comparator).await.unwrap();
             let stringified = Versions::stringify(&name, &version_data.version);
-            Self::append_version(parent, stringified.to_string(), Arc::clone(&context.dependency_map_mx)).unwrap();
 
             let package_info = PackageInfo {
                 version_data,
@@ -117,7 +129,7 @@ impl Installer {
                 stringified,
             };
 
-            Self::install_package(context.clone(), package_info).unwrap();
+            Self::install_package(context.clone(), package_info, Arc::clone(&parents_mux)).unwrap();
         }
     }
 }

@@ -62,9 +62,11 @@ impl CommandHandler for InstallHandler {
         let full_version_ref = full_version.as_ref();
         let (is_cached, cached_version) = Cache::exists(&self.package_name, full_version_ref, semantic_version_ref).await?;
 
+        utils::create_node_modules_dir();
+
         if is_cached {
-            let version = full_version_ref.or(cached_version.as_ref()).expect("Failed to get version");
-            Cache::load_cached_version(Versions::stringify(&self.package_name, version));
+            let version = cached_version.expect("Failed to get cached version");
+            Cache::load_cached_version(Versions::stringify(&self.package_name, &version));
             return Ok(());
         }
 
@@ -72,17 +74,20 @@ impl CommandHandler for InstallHandler {
 
         let (sender, receiver) = channel::<PackageBytes>();
 
+        // TODO: find a better way to handle this
+        // forced to use this to make sure that at least one task is received
+        // if not, the program might exit before the task is received
+        // which ends up in caching a package without the actual code
         let task_received = Arc::new(AtomicBool::new(false));
         TaskAllocator::add_blocking_task(move || {
             let task_received = Arc::clone(&task_received);
             println!("Starting extraction task...");
-            while let Ok((package_dest, bytes)) = receiver.recv() {
-                task_received.store(true, std::sync::atomic::Ordering::Relaxed);
-                println!("Extracting package to '{}'", package_dest);
-                utils::extract_tarball(bytes, package_dest).unwrap()
-            }
-            if task_received.load(std::sync::atomic::Ordering::Relaxed) {
-                println!("Extraction task completed!");
+            while !task_received.load(std::sync::atomic::Ordering::Relaxed) {
+                while let Ok((package_dest, bytes)) = receiver.recv() {
+                    task_received.store(true, std::sync::atomic::Ordering::Relaxed);
+                    println!("Extracting package to '{}'", package_dest);
+                    utils::extract_tarball(bytes, package_dest).unwrap()
+                }
             }
         });
 
@@ -98,17 +103,18 @@ impl CommandHandler for InstallHandler {
         let package_info = PackageInfo {
             version_data,
             is_latest: Versions::is_latest(full_version_ref),
-            stringified,
+            stringified: stringified.clone(),
         };
 
 
         println!("Installing the package");
-        Installer::install_package(install_context, package_info)?;
+        Installer::install_package(install_context, package_info, Arc::new(Mutex::new(Vec::new())))?;
         TaskAllocator::block_until_done();
         println!("All tasks are done!");
 
         println!("Writing lockfiles...");
         Self::write_lockfiles(dependency_map_mutex)?;
+        Cache::load_cached_version(stringified);
 
         println!("Package '{}' installed successfully!", self.package_name);
         Ok(())

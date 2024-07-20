@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::path::Path;
 use std::sync::atomic::AtomicUsize;
 use bytes::Bytes;
 use flate2::bufread::GzDecoder;
@@ -27,6 +28,14 @@ pub fn extract_tarball(bytes: Bytes, destination: String) -> Result<(), CommandE
     archive.unpack(&destination).map_err(CommandError::ExtractionFailed).expect("Failed to extract tarball");
 
     Ok(())
+}
+
+pub fn create_node_modules_dir() {
+    if Path::new("node_modules").exists() {
+        return;
+    }
+
+    std::fs::create_dir("./node_modules").expect("Failed to create node_modules directory");
 }
 
 pub static ACTIVE_TASKS: AtomicUsize = AtomicUsize::new(0);

@@ -39,9 +39,8 @@ impl Cache {
                 return Ok((latest_version.is_some(), latest_version));
             }
 
-            let str_version = Versions::stringify(package_name, version);
             return Ok((
-                Path::new(format!("{}/{}", *CACHE_DIR, str_version).as_str()).exists(),
+                Self::is_in_cache(package_name, &version),
                 Some(version.to_string())
             ))
         }
@@ -98,10 +97,41 @@ impl Cache {
     }
 
     pub fn get_latest_version_in_cache(package_name: &String) -> Option<String> {
-        CACHED_VERSIONS.get(package_name).map(|v| v.version.clone().to_string())
+        let versions = CACHED_VERSIONS.get(package_name);
+        match versions {
+            Some(v) if v.is_latest => Some(v.version.clone()),
+            _ => None,
+        }
+    }
+
+    pub fn is_in_cache(package: &String, version: &String) -> bool {
+        let cached_version = CACHED_VERSIONS.get(package);
+        match cached_version {
+            Some(v) if &v.version == version => true,
+            _ => false,
+        }
     }
 
     pub fn load_cached_version(package: String) {
-        println!("Need to implement loading cached version - Retrieve {}", package);
+        let raw = fs_sync::read_to_string(format!("{}/{}/package/pie-lock.json", *CACHE_DIR, package)).expect("Failed to read lock file");
+        let lock = serde_json::from_str::<PackageLock>(raw.as_str()).unwrap();
+
+        let mut dependencies = lock.dependencies;
+        dependencies.push(package);
+
+        for d in dependencies {
+            let (name, _) = Versions::parse_raw_package_details(d.to_string());
+
+            let link = symlink::symlink_dir(
+                format!("{}/{}/package", *CACHE_DIR, d),
+                format!("./node_modules/{}", name),
+            );
+
+            match link {
+                Ok(_) => continue,
+                Err(err) if err.kind() == ErrorKind::AlreadyExists => continue,
+                Err(e) => panic!("Failed to create symlink: {}", e),
+            }
+        }
     }
 }
